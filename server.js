@@ -4,18 +4,13 @@ const app = express();
 
 app.use(cors());
 
-// El servidor ahora buscará la llave en la "caja fuerte" de Railway
-const API_TOKEN = process.env.API_TOKEN;
+// URL pública de la API de rezarahiminia/worldcup2026 (Sin límites de peticiones)
+const API_BASE = 'https://worldcup26.ir/get';
 
-// Pequeña validación de seguridad para avisarte si falta la llave
-if (!API_TOKEN) {
-    console.error("¡ALERTA! No se encontró el API_TOKEN en las variables de entorno.");
-}
-
-// Nuestra Memoria Caché
+// Nuestra Memoria Caché optimizada
 let cachePartidos = { data: null, expiracion: 0 };
 let cacheGrupos = { data: null, expiracion: 0 };
-let cachePlantillas = {}; 
+let cacheEquipos = { data: null, expiracion: 0 }; 
 
 // Candados para evitar el "Efecto Estampida"
 let peticionPartidosPendiente = null;
@@ -24,31 +19,26 @@ let peticionPartidosPendiente = null;
 app.get('/api/partidos', async (req, res) => {
     const ahora = Date.now();
     
-    // Si hay caché válido, lo entrega al instante
     if (cachePartidos.data && ahora < cachePartidos.expiracion) {
         return res.json(cachePartidos.data);
     }
 
-    // Si ya hay una petición a la API en curso, espera esa misma respuesta (Candado)
     if (peticionPartidosPendiente) {
         const datos = await peticionPartidosPendiente;
         return res.json(datos);
     }
 
-    // Si no hay caché ni petición, crea una nueva
     try {
-        peticionPartidosPendiente = fetch('https://api.football-data.org/v4/competitions/WC/matches', {
-            headers: { 'X-Auth-Token': API_TOKEN }
-        }).then(r => r.json());
-
+        peticionPartidosPendiente = fetch(`${API_BASE}/games`).then(r => r.json());
         const datos = await peticionPartidosPendiente;
+        
         cachePartidos = { data: datos, expiracion: ahora + 60000 }; // 60 segundos
-        peticionPartidosPendiente = null; // Quita el candado
+        peticionPartidosPendiente = null; 
         
         res.json(datos);
     } catch (error) {
         peticionPartidosPendiente = null;
-        res.status(500).json({ error: 'Error al conectar con la API oficial' });
+        res.status(500).json({ error: 'Error al conectar con la API del Mundial' });
     }
 });
 
@@ -60,9 +50,7 @@ app.get('/api/grupos', async (req, res) => {
     }
 
     try {
-        const respuesta = await fetch('https://api.football-data.org/v4/competitions/WC/standings', {
-            headers: { 'X-Auth-Token': API_TOKEN }
-        });
+        const respuesta = await fetch(`${API_BASE}/groups`);
         const datos = await respuesta.json();
         cacheGrupos = { data: datos, expiracion: ahora + 600000 }; // 10 minutos
         res.json(datos);
@@ -71,27 +59,36 @@ app.get('/api/grupos', async (req, res) => {
     }
 });
 
-// 3. ENDPOINT JUGADORES (24 horas)
+// 3. ENDPOINT EQUIPOS (24 horas)
+// La nueva API maneja los equipos globalmente, por lo que almacenamos todos y filtramos
 app.get('/api/equipo/:id', async (req, res) => {
     const idEquipo = req.params.id;
     const ahora = Date.now();
 
-    // Revisa si existe la plantilla y si tiene menos de 24 horas (86,400,000 milisegundos)
-    if (cachePlantillas[idEquipo] && ahora < cachePlantillas[idEquipo].expiracion) {
-        return res.json(cachePlantillas[idEquipo].data);
-    }
-
     try {
-        const respuesta = await fetch(`https://api.football-data.org/v4/teams/${idEquipo}`, {
-            headers: { 'X-Auth-Token': API_TOKEN }
-        });
-        const datos = await respuesta.json();
+        if (!cacheEquipos.data || ahora > cacheEquipos.expiracion) {
+            const respuesta = await fetch(`${API_BASE}/teams`);
+            const datos = await respuesta.json();
+            // Adaptación por si la API devuelve el array directo o dentro de un objeto
+            const teamsArray = Array.isArray(datos) ? datos : (datos.teams || datos.data || []);
+            cacheEquipos = { data: teamsArray, expiracion: ahora + 86400000 }; // 24 horas
+        }
+
+        // Búsqueda flexible de ID
+        const equipoEncontrado = cacheEquipos.data.find(eq => 
+            String(eq.id) === String(idEquipo) || 
+            String(eq._id) === String(idEquipo) || 
+            String(eq.team_id) === String(idEquipo)
+        );
         
-        // Guarda la plantilla con una caducidad de 24 horas
-        cachePlantillas[idEquipo] = { data: datos, expiracion: ahora + 86400000 }; 
-        res.json(datos);
+        if (equipoEncontrado) {
+            res.json(equipoEncontrado);
+        } else {
+            res.status(404).json({ error: 'Equipo no encontrado' });
+        }
+
     } catch (error) {
-        res.status(500).json({ error: 'No se pudo obtener la plantilla' });
+        res.status(500).json({ error: 'No se pudo obtener la información del equipo' });
     }
 });
 
